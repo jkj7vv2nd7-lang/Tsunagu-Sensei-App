@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { GoogleGenAI, Type, Schema } from '@google/genai';
 
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || '' });
+// モジュール直下でのクライアント生成は行わない(リクエスト時に生成する)
 
 const responseSchema: Schema = {
   type: Type.OBJECT,
@@ -24,8 +24,18 @@ const responseSchema: Schema = {
 
 export async function POST(request: Request) {
   try {
+    // リクエスト毎にクライアント生成(ビルド時・環境未設定でのクラッシュ防止)
+    const apiKey = process.env.GEMINI_API_KEY || '';
+    if (!apiKey) {
+      return NextResponse.json({ error: "GEMINI_API_KEY が設定されていません。.env.local を確認してください。" }, { status: 500 });
+    }
+    const ai = new GoogleGenAI({ apiKey });
     const body = await request.json();
     const { studentId, subjectOrArea, episodes, endRule, customEnding, minChars, maxChars, tags, customNgWords } = body;
+
+    if (!episodes || String(episodes).trim().length === 0) {
+      return NextResponse.json({ error: "観察メモが空です。" }, { status: 400 });
+    }
 
     let endingInstruction = "";
     switch (endRule) {

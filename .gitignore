@@ -19,6 +19,15 @@
 
 # production
 /build
+/dist/
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+.venv-1/
+.venv*/
+*.egg-info/
 
 # misc
 .DS_Store

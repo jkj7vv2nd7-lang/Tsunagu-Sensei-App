@@ -32,7 +32,7 @@ export default function Generator() {
   const [minChars, setMinChars] = useState(120);
   const [maxChars, setMaxChars] = useState(150);
   const [selectedTags, setSelectedTags] = useState<string[]>(['自主性・主体性']);
-  
+
   // 設定保存用（LocalStorage）
   const [customNgWords, setCustomNgWords] = useState('落ち着きがない, わがまま, 集中力がない');
 
@@ -46,22 +46,55 @@ export default function Generator() {
   const [students, setStudents] = useState<StudentRow[]>([]);
   const [batchLoading, setBatchLoading] = useState(false);
 
-  // 初期化：保存された設定の読み込み
+  // 初期化：保存された設定の読み込み（マウント後のみ=SSRハイドレーション安全）
+  /* eslint-disable react-hooks/set-state-in-effect -- 初回マウント時の外部同期のため意図的使用 */
   useEffect(() => {
     const savedRule = localStorage.getItem('tsunagu_endRule');
     const savedCustomEnd = localStorage.getItem('tsunagu_customEnding');
     const savedNg = localStorage.getItem('tsunagu_ngWords');
+    const savedMin = localStorage.getItem('tsunagu_minChars');
+    const savedMax = localStorage.getItem('tsunagu_maxChars');
     if (savedRule) setEndRule(savedRule as EndRule);
     if (savedCustomEnd) setCustomEnding(savedCustomEnd);
     if (savedNg) setCustomNgWords(savedNg);
+    if (savedMin) setMinChars(Number(savedMin) || 120);
+    if (savedMax) setMaxChars(Number(savedMax) || 150);
   }, []);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   // 設定保存処理
   const saveSchoolRules = () => {
     localStorage.setItem('tsunagu_endRule', endRule);
     localStorage.setItem('tsunagu_customEnding', customEnding);
     localStorage.setItem('tsunagu_ngWords', customNgWords);
+    localStorage.setItem('tsunagu_minChars', String(minChars));
+    localStorage.setItem('tsunagu_maxChars', String(maxChars));
     alert('⚙️ 校内ルール設定を保存しました！次回起動時も適用されます。');
+  };
+
+  // CSV行分割: ダブルクォート内のカンマ・""エスケープに対応
+  const splitCsvLine = (line: string): string[] => {
+    const cols: string[] = [];
+    let cur = '';
+    let inQuotes = false;
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i];
+      if (ch === '"') {
+        if (inQuotes && line[i + 1] === '"') {
+          cur += '"';
+          i++;
+        } else {
+          inQuotes = !inQuotes;
+        }
+      } else if (ch === ',' && !inQuotes) {
+        cols.push(cur.trim());
+        cur = '';
+      } else {
+        cur += ch;
+      }
+    }
+    cols.push(cur.trim());
+    return cols.map(c => c.replace(/^"|"$/g, ''));
   };
 
   // タグトグル
@@ -85,44 +118,62 @@ export default function Generator() {
         })
       });
       const data = await res.json();
+      if (!res.ok) {
+        alert(`生成に失敗しました: ${data.error || res.statusText}`);
+        return;
+      }
       if (data.patterns) {
         setPatterns(data.patterns);
         setSelectedText(data.patterns[0]?.text || '');
         if (data.privacyWarning) setPrivacyWarning(data.privacyWarning);
+      } else {
+        alert(`生成に失敗しました: ${data.error || '不明なエラー'}`);
       }
-    } catch (e) {
-      alert('生成に失敗しました。');
+    } catch {
+      alert('生成に失敗しました。ネットワークを確認してください。');
     } finally {
       setLoading(false);
     }
   };
 
-  // CSV読み込み処理
+  // CSV読み込み処理 (UTF-8→Shift_JISフォールバック、クォート対応)
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    const reader = new FileReader();
-    reader.onload = (evt) => {
-      const text = evt.target?.result as string;
-      const lines = text.split('\n').filter(l => l.trim().length > 0);
+    const parseText = (text: string) => {
+      // BOM除去・改行正規化
+      const normalized = text.replace(/^\uFEFF/, '').replace(/\r\n/g, '\n');
+      const lines = normalized.split('\n').filter(l => l.trim().length > 0);
       const parsedRows: StudentRow[] = [];
 
       // 1行目はヘッダーとみなしてスキップ
       for (let i = 1; i < lines.length; i++) {
-        const cols = lines[i].split(',').map(c => c.trim().replace(/^"|"$/g, ''));
-        if (cols.length >= 3) {
+        const cols = splitCsvLine(lines[i]);
+        if (cols.length >= 3 && (cols[0] || cols[2])) {
           parsedRows.push({
             id: cols[0],
             subject: cols[1],
-            memo: cols[2],
+            // 4列以上ある場合は3列目以降をメモとして結合(メモ内カンマ救済)
+            memo: cols.length > 3 ? cols.slice(2).join(',') : cols[2],
             status: 'pending'
           });
         }
       }
       setStudents(parsedRows);
+      if (parsedRows.length === 0) {
+        alert('有効なデータ行が見つかりませんでした。ヘッダー+3列(生徒識別,対象領域,観察メモ)を確認してください。');
+      }
     };
-    reader.readAsText(file, 'UTF-8');
+
+    file.arrayBuffer().then((buf) => {
+      try {
+        parseText(new TextDecoder('utf-8', { fatal: true }).decode(buf));
+      } catch {
+        // Excel日本語CSVで多いShift_JISをフォールバック
+        parseText(new TextDecoder('shift-jis').decode(buf));
+      }
+    });
   };
 
   // CSV一括自動生成処理
@@ -149,13 +200,15 @@ export default function Generator() {
           })
         });
         const data = await res.json();
-        if (data.patterns && data.patterns[0]) {
+        if (res.ok && data.patterns && data.patterns[0]) {
           updated[i].result = data.patterns[0].text;
           updated[i].status = 'done';
         } else {
+          updated[i].result = data.error ? `エラー: ${data.error}` : '';
           updated[i].status = 'error';
         }
       } catch {
+        updated[i].result = 'エラー: 通信に失敗しました';
         updated[i].status = 'error';
       }
       setStudents([...updated]);
@@ -163,11 +216,12 @@ export default function Generator() {
     setBatchLoading(false);
   };
 
-  // 一括作成結果のCSVエクスポート
+  // 一括作成結果のCSVエクスポート("エスケープ対応)
+  const escapeCsv = (v: string) => `"${(v || '').replace(/"/g, '""').replace(/\r?\n/g, ' ')}"`;
   const exportBatchCSV = () => {
     let csvStr = "生徒識別,対象領域,観察メモ,AI生成結果\n";
     students.forEach(s => {
-      csvStr += `"${s.id}","${s.subject}","${s.memo.replace(/\n/g, ' ')}","${(s.result || '').replace(/\n/g, ' ')}"\n`;
+      csvStr += `${escapeCsv(s.id)},${escapeCsv(s.subject)},${escapeCsv(s.memo)},${escapeCsv(s.result || '')}\n`;
     });
 
     const blob = new Blob([new Uint8Array([0xEF, 0xBB, 0xBF]), csvStr], { type: 'text/csv;charset=utf-8;' });
@@ -178,6 +232,7 @@ export default function Generator() {
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
   };
 
   return (
@@ -264,6 +319,34 @@ export default function Generator() {
               />
             </div>
 
+            <details className="border rounded bg-slate-50 px-3 py-2">
+              <summary className="text-xs font-bold text-slate-600 cursor-pointer select-none">文字数を細かく指定（ふだんは開かなくてOK・設定タブと連動）</summary>
+              <div className="grid grid-cols-2 gap-3 mt-2">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-600 mb-1">最小文字数</label>
+                  <input
+                    type="number"
+                    min={50}
+                    max={500}
+                    value={minChars}
+                    onChange={(e) => setMinChars(Number(e.target.value) || 0)}
+                    className="w-full p-2 text-sm border rounded bg-white"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-600 mb-1">最大文字数</label>
+                  <input
+                    type="number"
+                    min={50}
+                    max={500}
+                    value={maxChars}
+                    onChange={(e) => setMaxChars(Number(e.target.value) || 0)}
+                    className="w-full p-2 text-sm border rounded bg-white"
+                  />
+                </div>
+              </div>
+            </details>
+
             <button
               onClick={handleGenerate}
               disabled={loading}
@@ -312,9 +395,24 @@ export default function Generator() {
             </div>
 
             <button
-              onClick={() => {
-                navigator.clipboard.writeText(selectedText);
-                alert('クリップボードにコピーしました！');
+              onClick={async () => {
+                try {
+                  await navigator.clipboard.writeText(selectedText);
+                  alert('クリップボードにコピーしました！');
+                } catch {
+                  // 非HTTPS環境向けフォールバック
+                  const ta = document.createElement('textarea');
+                  ta.value = selectedText;
+                  document.body.appendChild(ta);
+                  ta.select();
+                  try {
+                    document.execCommand('copy');
+                    alert('クリップボードにコピーしました！');
+                  } catch {
+                    alert('コピーに失敗しました。テキストを手動で選択してください。');
+                  }
+                  document.body.removeChild(ta);
+                }
               }}
               disabled={!selectedText}
               className="w-full py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold rounded shadow transition disabled:bg-slate-300"
@@ -432,6 +530,31 @@ export default function Generator() {
                 placeholder="例: 落ち着きがない, わがまま, 集中力がない"
               />
               <p className="text-[10px] text-slate-400 mt-1">※ここに指定した単語は、AIが自動で肯定的な成長表現へ変換します。</p>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs font-semibold text-slate-600 mb-1">所見の最小文字数</label>
+                <input
+                  type="number"
+                  min={50}
+                  max={500}
+                  value={minChars}
+                  onChange={(e) => setMinChars(Number(e.target.value) || 0)}
+                  className="w-full p-2 text-xs border rounded"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-slate-600 mb-1">所見の最大文字数</label>
+                <input
+                  type="number"
+                  min={50}
+                  max={500}
+                  value={maxChars}
+                  onChange={(e) => setMaxChars(Number(e.target.value) || 0)}
+                  className="w-full p-2 text-xs border rounded"
+                />
+              </div>
             </div>
 
             <button

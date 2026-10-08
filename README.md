@@ -1,36 +1,70 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# 🏫 統合校務支援システム「ツナグ先生」 V11.0
 
-## Getting Started
+![Version](https://img.shields.io/badge/version-11.0-blue.svg)
+![License](https://img.shields.io/badge/license-Freeware-green.svg)
+![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-lightgrey.svg)
 
-First, run the development server:
+**「ツナグ先生」** は、日々のお子さんの観察メモやスタンプ記録から、通知表・指導要録の「所見文案」および「保護者面談カルテ」を、AI（Google Gemini）を活用して自動生成・一括管理できる統合校務支援システムです。
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
-```
+---
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## ✨ 主な特徴
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+- 🤖 **Gemini APIを活用した高精度な文章生成**
+  - 通知表・要録の所見文案作成、誤字脱字・表現の校正、面談カルテの自動生成に対応。
+- 🔒 **プライバシー第一・強力な個人情報プロテクト**
+  - 入力された児童・生徒データはすべてお使いのPC内（メモリ上）のみで処理されます。
+  - **自動仮名化（マスキング）機能**: AIにデータを送信する際、氏名を自動的に「生徒A」「生徒B」等に置換するため、外部へ個人情報が流出することはありません。
+- 📦 **環境構築不要のWindowsアプリ（.exe）**
+  - Python環境の構築なしで、ダウンロードして解凍するだけですぐに利用可能です。
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+---
 
-## Learn More
+## 🚀 使い方・ダウンロード
 
-To learn more about Next.js, take a look at the following resources:
+### 1. アプリのダウンロード
+[最新のリリースページ](../../releases) から `ツナグ先生_V11.zip` をダウンロードしてください。
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+### 2. 起動手順
+1. ダウンロードした Zip ファイルを解凍（すべて展開）します。
+2. フォルダ内の `ツナグ先生.exe` を実行します。
+3. 自動的にブラウザが立ち上がり、操作画面が表示されます。
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+### 3. APIキーの設定
+本アプリのAI機能を利用するには、無料の **Google Gemini APIキー** が必要です。
+1. [Google AI Studio](https://aistudio.google.com/) にアクセスし、個人のGoogleアカウントでログインします。
+2. 「Create API key」をクリックしてキーを発行します。
+3. アプリの左サイドバーにある入力欄に貼り付けてご利用ください。
 
-## Deploy on Vercel
+---
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+## ⚠️ ダウンロード・実行時の注意点
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+- **Windows SmartScreen（青い警告画面）が表示された場合**
+  - 「詳細情報」をクリックし、現れた「実行」ボタンを押してください。（個人開発の実行ファイルで一律発生する仕様です）
+- **セキュリティソフトに検知された場合**
+  - フォルダごと「信頼できる対象（除外設定）」に追加してください。
+
+---
+
+## 🛠 動作環境
+
+| 項目 | 要件 |
+| :--- | :--- |
+| **対応OS** | Windows 10 / 11 (64bit) |
+| **通信環境** | インターネット接続（API通信用） |
+| **必要権限** | 個人所有の Google Gemini APIキー |
+
+---
+
+## 📄 免責事項・ライセンス
+
+- 本ソフトの著作権は **清水 正典** に帰属します。
+- 本ソフトはフリーソフトです。学校内・学年内での無料再配布や紹介はご自由に行って構いません。
+- 本ソフトの使用により生じた直接的・間接的な損害について、作者は一切の責任を負いません。生成された文章は必ず教員自身が確認・修正の上でご利用ください。
+
+---
+
+## ✉️ お問い合わせ
+- **作者**: 清水 正典
+- **バグ報告・ご意見**: GitHubの [Issues](../../issues) よりお知らせください。

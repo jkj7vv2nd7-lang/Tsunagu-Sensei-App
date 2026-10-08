@@ -2,295 +2,1122 @@ import streamlit as st
 import google.generativeai as genai
 import csv
 import io
+import pandas as pd
+import re
+import random
+from datetime import datetime, timedelta
+from docx import Document
 
 # ==========================================
-# 1. ページ初期設定
+# 1. ページ設定 & カスタムCSS
 # ==========================================
 st.set_page_config(
-    page_title="ツナグ先生 - 所見自動生成・編集システム (V4.0)",
-    page_icon="📝",
+    page_title="ツナグ先生 - 統合校務支援システム (V11.0 日常指導＆仮名化セキュリティ強化版)",
+    page_icon="🏫",
     layout="wide"
 )
 
-# ==========================================
-# 2. セッション状態の初期化
-# ==========================================
-if "school_rules" not in st.session_state:
-    st.session_state.school_rules = "・具体的なエピソードに基づき、成長のプロセスを評価する。\n・ポジティブな変化や意欲を中心に記述する。\n・専門用語は避け、保護者に分かりやすい表現にする。"
+st.markdown("""
+    <style>
+    /* 人間工学ベース: 16px基準・十分な行間・大きな操作面 */
+    html, body, .block-container {
+        font-size: 16px;
+        line-height: 1.7;
+    }
+    .block-container {
+        padding-top: 1.2rem !important;
+        padding-bottom: 2rem !important;
+        max-width: 1200px;
+    }
 
-if "chat_history" not in st.session_state:
-    st.session_state.chat_history = []
-
-if "generated_findings" not in st.session_state:
-    st.session_state.generated_findings = ""
-
-# ==========================================
-# 3. セキュリティ：ローカル完全匿名化ロジック
-# ==========================================
-def mask_pii(text, student_name=""):
-    """送信前に個人情報をダミーに置き換える"""
-    masked_text = text
-    name_map = {}
+    /* ワークフローバナー */
+    .workflow-banner {
+        background: linear-gradient(135deg, #e8f0fe 0%, #f8f9fa 100%);
+        border: 1px solid #c2d7fe;
+        border-radius: 12px;
+        padding: 12px 16px;
+        margin-bottom: 16px;
+    }
+    .workflow-banner .phase {
+        font-size: 0.8rem;
+        font-weight: 700;
+        color: #1a56db;
+        letter-spacing: 0.04em;
+    }
+    .workflow-banner .step-title {
+        font-size: 1.15rem;
+        font-weight: 800;
+        margin: 2px 0;
+    }
+    .workflow-banner .step-desc {
+        font-size: 0.9rem;
+        color: #374151;
+    }
     
-    if student_name and student_name.strip():
-        masked_text = masked_text.replace(student_name.strip(), "[生徒名]")
-        name_map["[生徒名]"] = student_name.strip()
+    .student-card { 
+        background-color: #f8f9fa; 
+        border: 1px solid #dee2e6; 
+        padding: 16px 18px; 
+        border-radius: 12px; 
+        margin-bottom: 15px; 
+    }
+
+    .alert-card {
+        background-color: #fff3cd;
+        border: 1px solid #ffeeba;
+        color: #664d03;
+        padding: 12px 14px;
+        border-radius: 8px;
+        margin-bottom: 10px;
+        font-size: 0.95rem;
+    }
+
+    .step-head {
+        font-size: 0.85rem;
+        font-weight: 800;
+        color: #1a56db;
+        background: #e8f0fe;
+        display: inline-block;
+        padding: 2px 10px;
+        border-radius: 999px;
+        margin-bottom: 6px;
+    }
+
+    /* 主要ボタンは48px以上・全幅で押しやすく */
+    .stButton > button[kind="primary"] {
+        min-height: 52px;
+        font-size: 1.02rem;
+        font-weight: 800;
+        border-radius: 10px;
+    }
+    .stButton > button {
+        min-height: 46px;
+        font-size: 0.98rem;
+        border-radius: 10px;
+    }
+    /* スタンプボタンは2列グリッドで大きく */
+    .stButton > button:hover {
+        border-color: #1a56db;
+    }
+
+    /* 入力欄は大きく・フォーカスを明確に */
+    .stTextInput input, .stSelectbox div[data-baseweb="select"] > div, .stTextArea textarea, .stNumberInput input {
+        font-size: 1rem !important;
+    }
+    .stTextArea textarea:focus, .stTextInput input:focus {
+        border-color: #1a56db !important;
+        box-shadow: 0 0 0 3px rgba(26,86,219,0.18) !important;
+    }
+    button:focus-visible, input:focus-visible, textarea:focus-visible, [data-baseweb="select"]:focus-within {
+        outline: 3px solid rgba(26,86,219,0.45) !important;
+        outline-offset: 1px;
+    }
+
+    /* サイドバーのナビは行間を広げる */
+    section[data-testid="stSidebar"] .stRadio > div {
+        gap: 6px;
+    }
+    </style>
+""", unsafe_allow_html=True)
+
+# ==========================================
+# 2. ダミーデータ生成ロジック
+# ==========================================
+
+@st.cache_data
+def generate_full_dummy_data():
+    surnames = ["佐藤", "鈴木", "高橋", "田中", "伊藤", "渡辺", "山本", "中村", "小林", "加藤", 
+                "吉田", "山田", "佐々木", "山口", "松本", "井上", "木村", "林", "斎藤", "清水"]
+    male_names = ["蓮", "悠真", "湊", "大翔", "樹", "陽翔", "悠人", "颯太", "陸", "翔太"]
+    female_names = ["葵", "陽葵", "凛", "結菜", "芽依", "詩", "結愛", "莉子", "咲良", "結衣"]
+
+    classes_config = [
+        ("1年1組", 40),
+        ("1年5組", 40),
+        ("2年2組", 40),
+        ("3年3組", 40),
+        ("3年5組", 40)
+    ]
+
+    master_list = []
+    score_list = []
     
-    return masked_text, name_map
+    random.seed(42)
 
-def unmask_pii(text, name_map):
-    """受信後にダミーを元の名前に復元する"""
-    unmasked_text = text
-    for placeholder, original_name in name_map.items():
-        unmasked_text = unmasked_text.replace(placeholder, original_name)
-    return unmasked_text
+    for cls_name, count in classes_config:
+        for num in range(1, count + 1):
+            gender = "男" if num % 2 != 0 else "女"
+            sname = surnames[(num - 1) % len(surnames)]
+            gname = male_names[(num - 1) % len(male_names)] if gender == "男" else female_names[(num - 1) % len(female_names)]
+            full_name = f"{sname} {gname}"
+
+            master_list.append({
+                "クラス": cls_name,
+                "出席番号": num,
+                "氏名": full_name,
+                "性別": gender,
+                "ステータス": "在籍",
+                "異動日": "",
+                "備考": "担任クラス" if cls_name == "1年1組" else "授業担当"
+            })
+
+            is_absent = (num == 13 or num == 27)
+            mid_score = None if is_absent else random.randint(45, 98)
+            final_score = random.randint(50, 100)
+            estimated_score = 65 if is_absent else None
+            
+            k1 = random.randint(55, 98)
+            k2 = random.randint(50, 95)
+            k3 = random.randint(60, 100)
+            
+            eval_1 = "A" if k1 >= 80 else ("B" if k1 >= 50 else "C")
+            eval_2 = "A" if k2 >= 80 else ("B" if k2 >= 50 else "C")
+            eval_3 = "A" if k3 >= 80 else ("B" if k3 >= 50 else "C")
+
+            avg = (k1 + k2 + k3) / 3
+            grade = 5 if avg >= 85 else (4 if avg >= 70 else (3 if avg >= 55 else (2 if avg >= 40 else 1)))
+
+            score_list.append({
+                "クラス": cls_name,
+                "出席番号": num,
+                "氏名": full_name,
+                "中間テスト": mid_score,
+                "期末テスト": final_score,
+                "見込み点": estimated_score,
+                "観点1_知識(点)": k1,
+                "観点1_評価": eval_1,
+                "観点2_思考(点)": k2,
+                "観点2_評価": eval_2,
+                "観点3_主体性(点)": k3,
+                "観点3_評価": eval_3,
+                "自動評定": grade,
+                "★確定評定": grade,
+                "調整フラグ": "―",
+                "調整理由": "",
+                "総合所見": f"{'課題に対して粘り強く思考し、工夫して解決策を導くことができました。' if grade >= 4 else '基礎的な計算力の定着が見られ、授業中の挙手・発言も意欲的です。'}"
+            })
+
+    logs_list = []
+    base_date = datetime.now()
+    memo_templates = [
+        ("数学", "方程式の立式において、自力で関係性を見つけ出して正解を導き出すことができた。"),
+        ("数学", "グループワークで解き方に悩んでいる班員に対して丁寧にやり方を教えていた。"),
+        ("総合・行動", "行事の実行委員に立候補し、クラス全体の意見をスムーズに集約・発表した。"),
+        ("総合・行動", "清掃活動において自分の担当場所が終わった後、進んで共有スペースの掃除を手伝った。"),
+        ("特別活動", "朝の読書時間に毎日落ち着いて読書に取り組み、クラスの静寂な雰囲気作りに貢献した。"),
+        ("国語・他", "朝の会での1分スピーチにて、自分の体験に基づいた説得力のある発表を行った。")
+    ]
+
+    c1_students = [m for m in master_list if m["クラス"] == "1年1組"]
+    for idx, st_item in enumerate(c1_students):
+        if st_item["出席番号"] % 2 != 0:
+            days_ago = random.randint(1, 10)
+        else:
+            days_ago = random.randint(25, 40)
+            
+        d_str = (base_date - timedelta(days=days_ago)).strftime("%Y-%m-%d")
+        cat, memo_text = memo_templates[idx % len(memo_templates)]
+        logs_list.append({
+            "日付": d_str,
+            "クラス": "1年1組",
+            "出席番号": st_item["出席番号"],
+            "氏名": st_item["氏名"],
+            "対象分野": cat,
+            "観察メモ": memo_text
+        })
+
+    return pd.DataFrame(master_list), pd.DataFrame(score_list), pd.DataFrame(logs_list)
+
 
 # ==========================================
-# 4. APIキーの自動取得 (エラー安全処理)
+# 3. セッション状態の初期化
 # ==========================================
+
+if "school_year" not in st.session_state:
+    st.session_state.school_year = "2026"
+if "teacher_name" not in st.session_state:
+    st.session_state.teacher_name = "山田 太郎"
+
+df_master, df_scores, df_logs = generate_full_dummy_data()
+
+if "student_master" not in st.session_state:
+    st.session_state.student_master = df_master
+
+if "daily_logs" not in st.session_state:
+    st.session_state.daily_logs = df_logs
+
+if "subject_scores" not in st.session_state:
+    st.session_state.subject_scores = df_scores
+
+# APIキーの初期化（st.secretsがあれば取得）
 api_key = ""
 try:
     if "GEMINI_API_KEY" in st.secrets:
         api_key = st.secrets["GEMINI_API_KEY"]
 except Exception:
-    # ローカル環境等で secrets.toml が存在しない場合はエラーを出さずにパス
     pass
 
-# ==========================================
-# 5. サイドバー設定
-# ==========================================
+# サイドバー全メニュー統合（作業フロー順: 準備→記録→評価・生成→出力。文言キー自体は既存維持でロジック非破壊）
+menu_options = [
+    "--- STEP 0 準備 ---",
+    "⚙️ ⓪ 担任＆授業担当 名簿管理",
+    "--- STEP 1 毎日の記録 ---",
+    "📝 ① 日々メモ・クイックスタンプ & 所見",
+    "🔔 ② 学級日常ダッシュボード（観察アラート）",
+    "--- STEP 2 評価・生成 ---",
+    "📊 ⑥ 成績・観点A/B/C算出＆人間調整",
+    "📈 ⑦ 学期推移ダッシュボード",
+    "📁 ③ CSV一括生成",
+    "🔍 ④ 所見データ自動校正",
+    "💬 ⑤ 蓄積連動カルテ",
+    "--- STEP 3 出力・集約 ---",
+    "🔄 ⑧ 担任用 全教科成績集約",
+    "🖨️ ⑨ 完成版プレビュー ＆ ファイルダウンロード（通知表・指導要録）",
+]
+
+# 画面ごとの作業ガイド（人間工学: 今何をする画面か・次は何かを明示）
+WORKFLOW_META = {
+    "⚙️ ⓪ 担任＆授業担当 名簿管理": ("STEP 0 準備", "名簿を整える", "年度初め・転入出時にクラス名簿を確定します。次は STEP1 の日々メモへ。", "📝 ① 日々メモ・クイックスタンプ & 所見"),
+    "📝 ① 日々メモ・クイックスタンプ & 所見": ("STEP 1 記録", "見つけた良さをすぐ記録", "左で対象→スタンプ/メモ保存、右で所見生成。入力と出力が同一画面で完結します。", "🔔 ② 学級日常ダッシュボード（観察アラート）"),
+    "🔔 ② 学級日常ダッシュボード（観察アラート）": ("STEP 1 確認", "見取りの偏りをなくす", "14日以上メモなしの児童を確認し、STEP1に戻って記録します。", "📊 ⑥ 成績・観点A/B/C算出＆人間調整"),
+    "📊 ⑥ 成績・観点A/B/C算出＆人間調整": ("STEP 2 評価", "数値を人が最終調整", "カッティングポイント再計算→★確定評定を上書き→保存の順で操作します。", "📁 ③ CSV一括生成"),
+    "📈 ⑦ 学期推移ダッシュボード": ("STEP 2 確認", "伸び・落ち込みを把握", "中間→期末の推移とフォロー対象を確認します。", "📁 ③ CSV一括生成"),
+    "📁 ③ CSV一括生成": ("STEP 2 生成", "クラス全員分を一気に作成", "対象クラス→一括生成→CSV保存。校正が必要なら次へ。", "🔍 ④ 所見データ自動校正"),
+    "🔍 ④ 所見データ自動校正": ("STEP 2 仕上げ", "誤字・表現を整える", "クラス→児童→校正実行の3ステップです。", "💬 ⑤ 蓄積連動カルテ"),
+    "💬 ⑤ 蓄積連動カルテ": ("STEP 2 面談準備", "記録＋成績で話す材料に", "クラス→児童の順に選び、面談ポイントを生成します。", "🖨️ ⑨ 完成版プレビュー ＆ ファイルダウンロード（通知表・指導要録）"),
+    "🔄 ⑧ 担任用 全教科成績集約": ("STEP 3 集約", "教科の評定を1枚に", "対象クラスを選んで結合テスト→CSV保存します。", "🖨️ ⑨ 完成版プレビュー ＆ ファイルダウンロード（通知表・指導要録）"),
+    "🖨️ ⑨ 完成版プレビュー ＆ ファイルダウンロード（通知表・指導要録）": ("STEP 3 出力", "渡す形にして終える", "文書種別→クラス→児童→形式の順で出力します。", ""),
+}
+
+if "selected_menu" not in st.session_state:
+    st.session_state.selected_menu = "📝 ① 日々メモ・クイックスタンプ & 所見"
+if "current_class" not in st.session_state:
+    st.session_state.current_class = "1年1組"
+
 with st.sidebar:
-    st.header("⚙️ 全体設定")
+    st.title("🏫 ツナグ先生")
+    st.caption(f"統合校務支援システム (V11.0 / {st.session_state.school_year}年度)")
+    st.markdown("**📌 作業ステップで選ぶ（上→下が作業順）**")
+    # 既存デフォルト(①)を維持しつつ、作業順に並べ替え済み
+    try:
+        default_idx = menu_options.index(st.session_state.selected_menu)
+    except ValueError:
+        default_idx = 3
+    nav_selection = st.radio("機能選択", options=menu_options, index=default_idx, label_visibility="collapsed")
     
-    # Secretsになければ画面から手入力
-    if not api_key:
-        api_key = st.text_input("Gemini API Key", type="password", help="APIキーを入力してください")
-    else:
-        st.success("🔑 APIキー連携完了（Secrets）")
-        
-    if api_key:
-        genai.configure(api_key=api_key)
+    if not nav_selection.startswith("---"):
+        st.session_state.selected_menu = nav_selection
 
     st.markdown("---")
-    st.subheader("📋 用途・文末ルールの選択")
+    with st.expander("⚙️ 基本設定（年度・担任・文末・文字数）", expanded=False):
+        st.session_state.school_year = st.text_input("年度設定", st.session_state.school_year)
+        st.session_state.teacher_name = st.text_input("担任教員名", st.session_state.teacher_name)
+        doc_type = st.radio("文末モード:", ["です・ます調（通知表）", "である・した調（要録）"], key="doc_type_radio")
+        max_char_limit = st.slider("所見の文字数目安（AI生成）:", min_value=50, max_value=300, value=150, step=10)
     
-    doc_type = st.radio(
-        "作成する文書の種類を選んでください:",
-        ["通知表用（です・ます調）", "指導要録用（である・した調）", "観点記述型（〜ができる/〜に努める）"],
-        index=0
-    )
+    with st.expander("🔒 セキュリティ & API", expanded=False):
+        # 個人情報匿名化プロテクトの切り替えスイッチ
+        use_anonymize = st.toggle("🔒 AI送信時の個人情報仮名化プロテクト", value=True, help="AIプロンプト送信時に氏名を『生徒A』等に自動変換し、個人情報の漏洩を強力に防止します。")
 
-    if doc_type == "通知表用（です・ます調）":
-        ending_instruction = "文末は必ず「〜でした。」「〜が見られました。」「〜に取り組んでいます。」などの【敬体（です・ます調）】で統一してください。"
-    elif doc_type == "指導要録用（である・した調）":
-        ending_instruction = "文末は必ず「〜した。」「〜が見られた。」「〜についての理解を深めた。」などの【常体（である・した調/断定調）】で統一してください。"
-    else:
-        ending_instruction = "文末は「〜ができる。」「〜を理解している。」「〜に意欲的に取り組む。」などの【観点評価形式】で統一してください。"
-
-    st.markdown("---")
-    st.subheader("🏫 校内固有のルール")
-    st.session_state.school_rules = st.text_area(
-        "追加ルールがあれば記述:",
-        value=st.session_state.school_rules,
-        height=120
-    )
-    
-    st.success("🔒 個人情報保護フィルター: 有効")
-
-# ==========================================
-# 6. メイン画面
-# ==========================================
-st.title("📝 ツナグ先生 - 所見自動生成システム")
-st.caption(f"現在のモード: **{doc_type}**")
-
-tab1, tab2, tab3 = st.tabs(["👤 個人作成 & AI微調整", "📁 CSVクラス一括作成", "🖨️ 印刷プレビュー・校務連携"])
-
-# ------------------------------------------
-# タブ1: 個人作成 ＆ 高度化プロンプト
-# ------------------------------------------
-with tab1:
-    col1, col2 = st.columns([1, 1])
-    
-    with col1:
-        st.subheader("1. 観察記録の入力")
-        student_name = st.text_input("生徒名（省略可）", placeholder="例: 山田 太郎")
-        subject = st.selectbox("対象・分野", ["総合（通知表/要録）", "行動の記録", "国語", "数学", "理科", "社会", "英語", "体育", "特別活動・その他"])
-        episodes = st.text_area(
-            "具体的なエピソード・観察メモ", 
-            placeholder="短いメモでもOK！\n例:\n・理科 実験で班長\n・後半の計算ミス 自発的にチェック", 
-            height=160
+        # 🔑 Gemini APIキー入力エリア（追加・更新部分）
+        st.markdown("**🔑 Google Gemini APIキー設定**")
+        user_api_key = st.text_input(
+            "APIキーを入力してください", 
+            value=api_key,
+            type="password", 
+            help="Google AI Studio等で無料で取得できるGemini APIキーを入力します。"
         )
-        max_chars = st.number_input("希望文字数（目安）", min_value=50, max_value=500, value=150, step=10)
         
-        generate_btn = st.button("✨ 所見文案を生成する", use_container_width=True, type="primary")
+        if user_api_key:
+            api_key = user_api_key
+            try:
+                genai.configure(api_key=api_key)
+                st.success("🔑 API連携中")
+            except Exception as e:
+                st.error(f"APIキー設定エラー: {e}")
+        else:
+            st.warning("⚠️ APIキー未設定です")
+    # 後方互換: expander外から参照される変数を必ず定義
+    if "doc_type" not in locals():
+        doc_type = st.session_state.get("doc_type_radio", "です・ます調（通知表）")
+    if "max_char_limit" not in locals():
+        max_char_limit = 150
+    if "use_anonymize" not in locals():
+        use_anonymize = True
+    ending_rule = "文末は「です・ます」調で統一。" if "です" in doc_type else "文末は「である・した」調で統一。"
 
-    with col2:
-        st.subheader("2. 生成結果 & AIチャット微調整")
-        
-        if generate_btn:
-            if not api_key:
-                st.error("サイドバーでAPIキーを入力してください。")
-            elif not episodes:
-                st.warning("エピソードを入力してください。")
-            else:
-                try:
-                    model = genai.GenerativeModel("gemini-2.5-flash")
-                    masked_episodes, name_map = mask_pii(episodes, student_name)
-                    
-                    # 💡 高度化プロンプト（段階的思考の導入）
-                    prompt = f"""
-                    あなたはベテランの小学校・中学校教員です。
-                    提供された断片的な観察メモから、児童生徒の強みや成長の姿が伝わる質の高い所見文章を作成してください。
 
-                    【基本情報】
-                    - 対象分野: {subject}
-                    - 観察メモ: {masked_episodes}
-                    - 目安文字数: 約{max_chars}文字前後（指定文字数から±15%以内）
+def render_workflow_banner(menu_key):
+    meta = WORKFLOW_META.get(menu_key)
+    if not meta:
+        return
+    phase, title, desc, next_menu = meta
+    next_html = f"<div style='font-size:0.85rem;margin-top:4px;'>次 → {next_menu}</div>" if next_menu else "<div style='font-size:0.85rem;margin-top:4px;'>全ステップ完了です。お疲れさまでした。</div>"
+    st.markdown(f"""
+    <div class="workflow-banner">
+        <div class="phase">{phase}</div>
+        <div class="step-title">{menu_key}：{title}</div>
+        <div class="step-desc">{desc}</div>
+        {next_html}
+    </div>
+    """, unsafe_allow_html=True)
+    c1, c2 = st.columns([1, 1])
+    with c1:
+        if st.button("◀ 前のステップへ", key=f"prev_{menu_key}", use_container_width=True):
+            keys = [k for k in menu_options if not k.startswith("---")]
+            if menu_key in keys and keys.index(menu_key) > 0:
+                st.session_state.selected_menu = keys[keys.index(menu_key) - 1]
+                st.rerun()
+    with c2:
+        if next_menu and st.button("次のステップへ ▶", key=f"next_{menu_key}", type="primary", use_container_width=True):
+            st.session_state.selected_menu = next_menu
+            st.rerun()
 
-                    【作成の手引き（思考プロセス）】
-                    1. 観察メモ内の事実から「どんな資質・能力（主体性、協調性、思考力など）」が表れているかを読み取ってください。
-                    2. 「事実（行い）」だけでなく、「そこに至る姿勢」や「今後の期待・成長」へ自然に繋げてください。
-                    3. 重複した表現を避け、一文一文を適度な長さに保って可読性を高めてください。
 
-                    【厳格ルール】
-                    - {ending_instruction}
-                    - 校内ルール: {st.session_state.school_rules}
-                    - 解説、挨拶、前置きは一切不要です。所見の文章本文のみを出力してください。
-                    """
-                    
-                    with st.spinner(f"AIが作成中（{doc_type}）..."):
-                        response = model.generate_content(prompt)
-                        final_text = unmask_pii(response.text.strip(), name_map)
-                        
-                        st.session_state.generated_findings = final_text
-                        st.session_state.chat_history = [{"role": "assistant", "content": final_text}]
-                except Exception as e:
-                    st.error(f"エラーが発生しました: {e}")
+# ヘルパー関数
+def replace_docx_tags(doc, data_dict):
+    def _replace_tag_in_paragraph(p, tag, value):
+        # p.text は run 結合結果。タグが run 分割されていても検出できるよう全文で判定する。
+        # 既存動作(書式保持は最小限)を維持しつつ、分割タグの取りこぼしを防ぐ。
+        if tag not in p.text:
+            return
+        full = "".join(r.text for r in p.runs) if p.runs else p.text
+        full = full.replace(tag, value)
+        if p.runs:
+            p.runs[0].text = full
+            for r in p.runs[1:]:
+                r.text = ""
+        else:
+            p.text = full
 
-        if st.session_state.generated_findings:
-            edited_text = st.text_area("現在の文案（手修正可能）:", value=st.session_state.generated_findings, height=130)
-            st.session_state.generated_findings = edited_text
-            
-            st.caption(f"文字数: {len(edited_text)}文字")
-            st.markdown("---")
-            
-            st.caption("💬 **AIに対話で修正指示を出す（チャット調整）**")
-            user_instruction = st.text_input("修正の指示:", placeholder="例: 「あと20文字縮めて」「後半の算数の努力をもっと強調して」")
-            if st.button("✨ 指示通りに微調整する"):
-                if user_instruction and api_key:
-                    model = genai.GenerativeModel("gemini-2.5-flash")
-                    refine_prompt = f"""
-                    現在の所見文章を、指示に従って修正・再構築してください。
-                    
-                    【現在の文章】
-                    {st.session_state.generated_findings}
-                    
-                    【修正指示】
-                    {user_instruction}
-                    
-                    【遵守ルール】
-                    - {ending_instruction}
-                    - {st.session_state.school_rules}
-                    
-                    本文のみを出力してください。
-                    """
-                    with st.spinner("微調整中..."):
-                        response = model.generate_content(refine_prompt)
-                        st.session_state.generated_findings = response.text.strip()
+    def replace_in_paragraphs(paragraphs):
+        for p in paragraphs:
+            for key, value in data_dict.items():
+                tag = f"{{{{{key}}}}}"
+                _replace_tag_in_paragraph(p, tag, str(value) if value is not None else "")
+
+    def replace_in_table(table):
+        for row in table.rows:
+            for cell in row.cells:
+                replace_in_paragraphs(cell.paragraphs)
+                for nested_table in cell.tables:
+                    replace_in_table(nested_table)
+
+    replace_in_paragraphs(doc.paragraphs)
+    for table in doc.tables:
+        replace_in_table(table)
+    for section in doc.sections:
+        replace_in_paragraphs(section.header.paragraphs)
+        replace_in_paragraphs(section.footer.paragraphs)
+        for table in section.header.tables:
+            replace_in_table(table)
+        for table in section.footer.tables:
+            replace_in_table(table)
+
+    return doc
+
+# 匿名化処理を内包した安全なAI生成関数
+def safe_generate_content(prompt_text, student_name_map=None):
+    if not api_key:
+        return "⚠️ Gemini API Keyが設定されていません。サイドバーから設定してください。"
+    
+    # 仮名化（マスキング）処理
+    masked_prompt = prompt_text
+    reverse_map = {}
+    
+    if use_anonymize and student_name_map:
+        for idx, real_name in enumerate(student_name_map):
+            fake_name = f"生徒{chr(65 + idx)}"  # 生徒A, 生徒B...
+            masked_prompt = masked_prompt.replace(real_name, fake_name)
+            reverse_map[fake_name] = real_name
+
+    try:
+        model = genai.GenerativeModel("gemini-2.5-flash")
+        res = model.generate_content(masked_prompt)
+        res_text = res.text.strip()
+
+        # 復元処理
+        if use_anonymize and reverse_map:
+            for fake_name, real_name in reverse_map.items():
+                res_text = res_text.replace(fake_name, real_name)
+
+        return res_text
+    except Exception as e:
+        return f"❌ AI生成中にエラーが発生しました: {str(e)}"
+
+def get_all_classes():
+    classes = sorted(st.session_state.student_master["クラス"].dropna().unique().tolist())
+    return classes if classes else ["1年1組"]
+
+def get_active_students(cls_name=None):
+    df = st.session_state.student_master
+    active_df = df[df["ステータス"] == "在籍"]
+    if cls_name:
+        active_df = active_df[active_df["クラス"] == cls_name]
+    return active_df["氏名"].tolist()
+
+def get_student_number(cls_name, student_name):
+    """クラス+氏名から出席番号を引く。見つからなければ空文字。スタンプ登録の番号固定(1)問題の修正用。"""
+    try:
+        df = st.session_state.student_master
+        match = df[(df["クラス"] == cls_name) & (df["氏名"] == student_name) & (df["ステータス"] == "在籍")]
+        if not match.empty:
+            return int(match.iloc[0]["出席番号"])
+    except Exception:
+        pass
+    return ""
+
+
+selected_menu = st.session_state.selected_menu
+
+render_workflow_banner(selected_menu)
+
+# ==========================================
+# メイン画面処理
+# ==========================================
+
+# ------------------------------------------
+# 機能0: ⓪ 担任＆授業担当 名簿管理
+# ------------------------------------------
+if selected_menu == "⚙️ ⓪ 担任＆授業担当 名簿管理":
+    st.subheader("⚙️ 全5クラス（200名）マスター名簿管理")
+    m_tab1, m_tab2, m_tab3 = st.tabs(["🏫 担任＆全担当クラス名簿・手動編集", "📥 Excel/CSV ファイルから一括取り込み", "📚 授業担当クラス名簿（コピペ・CSV出力）"])
+    
+    with m_tab1:
+        col_m1, col_m2 = st.columns([1.3, 1])
+        with col_m1:
+            st.markdown("### 📋 全生徒マスター名簿（200名）")
+            edited_master = st.data_editor(
+                st.session_state.student_master,
+                num_rows="dynamic",
+                use_container_width=True,
+                height=450,
+                key="master_editor"
+            )
+            st.session_state.student_master = edited_master
+
+        with col_m2:
+            st.markdown("### 🔄 転入・転出手続き")
+            st.caption("ふだんは不要です。異動があるときだけ開いてください。")
+            with st.expander("手続きフォームを開く（必要なときだけ）", expanded=False):
+                action_type = st.radio("手続き種別:", ["生徒の新規登録・転入処理", "年度途中 転出（除籍）処理"])
+                if action_type == "生徒の新規登録・転入処理":
+                    with st.form("trans_in_form"):
+                        current_classes = get_all_classes()
+                        in_cls_select = st.selectbox("登録クラス", current_classes + ["新規クラスを直接入力"])
+                        in_cls_custom = st.text_input("新規クラス名（例: 2年3組）") if in_cls_select == "新規クラスを直接入力" else ""
+                        target_cls = in_cls_custom if in_cls_select == "新規クラスを直接入力" else in_cls_select
+                        in_num = st.number_input("出席番号", min_value=1, max_value=50, value=41)
+                        in_name = st.text_input("生徒氏名")
+                        in_gender = st.selectbox("性別", ["男", "女"])
+                        in_date = st.date_input("登録日")
+                        if st.form_submit_button("➕ 生徒を登録する", use_container_width=True) and in_name.strip() and target_cls:
+                            new_st = pd.DataFrame([{"クラス": target_cls, "出席番号": in_num, "氏名": in_name, "性別": in_gender, "ステータス": "在籍", "異動日": str(in_date), "備考": "転入"}])
+                            st.session_state.student_master = pd.concat([st.session_state.student_master, new_st], ignore_index=True)
+                            st.success(f"{target_cls} に {in_name} さんを登録しました！")
+                            st.rerun()
+
+                else:
+                    with st.form("trans_out_form"):
+                        # 同姓同名・他クラス重複に備え、クラス+番号付きラベルで行を一意に特定する
+                        _active_df = st.session_state.student_master[st.session_state.student_master["ステータス"] == "在籍"].sort_values(by=["クラス", "出席番号"])
+                        _labels = [f"{r['クラス']} {r['出席番号']}番 {r['氏名']}" for _, r in _active_df.iterrows()]
+                        _label_to_idx = {label: idx for label, idx in zip(_labels, _active_df.index.tolist())}
+                        out_label = st.selectbox("転出生徒を選択", _labels)
+                        out_date = st.date_input("転出日")
+                        out_reason = st.text_input("転出理由")
+                        if st.form_submit_button("⚠️ 転出処理を実行", use_container_width=True) and out_label:
+                            target_idx = _label_to_idx.get(out_label)
+                            out_name = st.session_state.student_master.loc[target_idx, "氏名"]
+                            st.session_state.student_master.loc[target_idx, "ステータス"] = "転出"
+                            st.session_state.student_master.loc[target_idx, "異動日"] = str(out_date)
+                            st.session_state.student_master.loc[target_idx, "備考"] = out_reason
+                            st.warning(f"{out_name} さんの転出処理を完了しました。")
+                            st.rerun()
+
+    with m_tab2:
+        st.markdown("### 📥 既存の名簿ファイル（.xlsx / .csv）を一括取り込み")
+        uploaded_file = st.file_uploader("名簿ファイルをアップロード:", type=["csv", "xlsx"])
+        if uploaded_file is not None:
+            try:
+                imp_df = pd.read_csv(uploaded_file) if uploaded_file.name.endswith(".csv") else pd.read_excel(uploaded_file)
+                st.write("📖 **プレビュー:**")
+                st.dataframe(imp_df.head(), use_container_width=True)
+                req_cols = ["クラス", "出席番号", "氏名"]
+                if all(col in imp_df.columns for col in req_cols):
+                    if "性別" not in imp_df.columns: imp_df["性別"] = "未設定"
+                    if "ステータス" not in imp_df.columns: imp_df["ステータス"] = "在籍"
+                    if "異動日" not in imp_df.columns: imp_df["異動日"] = ""
+                    if "備考" not in imp_df.columns: imp_df["備考"] = "ファイル取込"
+                    if st.button("🚀 この名簿データをシステムに取り込む"):
+                        st.session_state.student_master = imp_df[st.session_state.student_master.columns]
+                        st.success("🎉 名簿データベースの更新が完了しました！")
                         st.rerun()
+                else:
+                    st.error("必須列（クラス, 出席番号, 氏名）が含まれていません。")
+            except Exception as e:
+                st.error(f"読み込みエラー: {e}")
+
+    with m_tab3:
+        st.markdown("### 📚 担当5クラスの個別名簿抽出")
+        all_classes = get_all_classes()
+        selected_teach_cls = st.multiselect("抽出対象クラス選択:", all_classes, default=all_classes)
+        if selected_teach_cls:
+            sub_df = st.session_state.student_master[
+                (st.session_state.student_master["クラス"].isin(selected_teach_cls)) &
+                (st.session_state.student_master["ステータス"] == "在籍")
+            ][["クラス", "出席番号", "氏名", "性別"]].sort_values(by=["クラス", "出席番号"])
+            st.dataframe(sub_df, use_container_width=True, height=300)
+            st.text_area("Excel貼り付け用タブ区切りテキスト (Ctrl+V用):", sub_df.to_csv(sep='\t', index=False), height=100)
 
 # ------------------------------------------
-# タブ2: CSV一括作成
+# 機能1: ① 日々メモ・クイックスタンプ & 所見
 # ------------------------------------------
-with tab2:
-    st.subheader("CSVファイルからクラス全員分を一括生成")
-    st.caption(f"※現在設定されているルール: **{doc_type}**")
-    
-    uploaded_file = st.file_uploader("CSVファイルをアップロード (列: 名前, エピソード)", type=["csv"])
-    
-    if uploaded_file:
-        content = uploaded_file.getvalue().decode("utf-8")
-        csv_reader = csv.reader(io.StringIO(content))
-        header = next(csv_reader, None)
-        rows = list(csv_reader)
-        
-        st.write(f"📂 読み込んだ生徒数: **{len(rows)}名**")
-        
-        if st.button("🚀 全員分を一括生成する", type="primary"):
-            if not api_key:
-                st.error("APIキーを入力してください。")
-            else:
-                model = genai.GenerativeModel("gemini-2.5-flash")
-                results = [["名前", "入力エピソード", "生成所見"]]
-                
-                progress_bar = st.progress(0)
-                status_text = st.empty()
-                
-                for i, row in enumerate(rows):
-                    if len(row) >= 2:
-                        name, ep = row[0], row[1]
-                        status_text.text(f"処理中 ({i+1}/{len(rows)}): {name}さん")
-                        
-                        masked_ep, name_map = mask_pii(ep, name)
-                        
-                        prompt = f"""
-                        ベテラン教員として、以下のエピソードから適切な所見を作成してください。
-                        - エピソード: {masked_ep}
-                        
-                        【必須ルール】
-                        - {ending_instruction}
-                        - {st.session_state.school_rules}
-                        
-                        本文のみを出力してください。
-                        """
-                        try:
-                            res = model.generate_content(prompt)
-                            clean_res = unmask_pii(res.text.strip(), name_map)
-                            results.append([name, ep, clean_res])
-                        except Exception as e:
-                            results.append([name, ep, f"エラー: {e}"])
-                        
-                        progress_bar.progress((i + 1) / len(rows))
-                
-                status_text.success("全員分の生成が完了しました！")
-                
-                output = io.StringIO()
-                writer = csv.writer(output)
-                writer.writerows(results)
-                
-                st.download_button(
-                    label="📥 生成結果をCSVでダウンロード",
-                    data=output.getvalue().encode("utf-8-sig"),
-                    file_name="所見一括生成結果.csv",
-                    mime="text/csv"
-                )
-
-# ------------------------------------------
-# タブ3: 印刷・校務システム連携
-# ------------------------------------------
-with tab3:
-    st.subheader("🖨️ 印刷プレビュー ＆ 校務システム用コピペ")
-    
-    if st.session_state.generated_findings:
-        st.markdown("### 📋 校務Webシステム（ミライシード/C4th等）貼り付け用")
-        st.code(st.session_state.generated_findings, language=None)
-        
-        st.markdown("---")
-        st.markdown("### 📄 確認・提出用カード印刷プレビュー")
-        st.caption("※ブラウザの「印刷」（Ctrl + P）でそのままPDF化・紙印刷が可能です。")
-        
-        print_html = f"""
-        <div style="border: 2px solid #333; padding: 20px; border-radius: 8px; background-color: #fff; color: #000;">
-            <div style="display: flex; justify-content: space-between; border-bottom: 2px solid #333; padding-bottom: 8px; margin-bottom: 12px;">
-                <h3 style="margin: 0;">所見確認シート ({doc_type})</h3>
-                <span style="font-size: 14px;">対象: {student_name if student_name else '未設定'}</span>
-            </div>
-            <p style="font-size: 15px; line-height: 1.8; white-space: pre-wrap; margin-top: 10px;">{st.session_state.generated_findings}</p>
-            <div style="margin-top: 20px; text-align: right; font-size: 12px; color: #666;">
-                文字数: {len(st.session_state.generated_findings)}文字
-            </div>
-        </div>
-        """
-        st.components.v1.html(print_html, height=260, scrolling=True)
+elif selected_menu == "📝 ① 日々メモ・クイックスタンプ & 所見":
+    st.subheader("📝 日々の観察記録 ＆ クイックスタンプ登録 ＆ AI所見生成")
+    st.caption("左→右が作業順です。①対象を選ぶ → ②スタンプ/メモを残す → ③右側で生成・確認。1画面で入力と出力が完結します。")
+    all_cls = get_all_classes()
+    # クラス引継ぎ: 前回選択を初期値に（人間工学: 繰り返し入力の削減）
+    if st.session_state.current_class in all_cls:
+        default_cls_idx = all_cls.index(st.session_state.current_class)
     else:
-        st.info("※「個人作成」タブで所見を生成すると、ここにコピー用テキストと印刷枠が表示されます。")
+        default_cls_idx = 0
+    col_a, col_b = st.columns([1, 1.15], gap="large")
+
+    with col_a:
+        st.markdown('<div class="step-head">STEP 1 対象を選ぶ</div>', unsafe_allow_html=True)
+        st.markdown("### 📌 誰の記録か")
+        f_class = st.selectbox("クラス（よく使うクラスが記憶されます）", all_cls, index=default_cls_idx, key="quick_cls")
+        st.session_state.current_class = f_class
+        c_students = get_active_students(f_class)
+        if not c_students:
+            st.warning("このクラスに在籍生徒がいません。⓪名簿管理で名簿を確認してください。")
+            st.stop()
+        f_name = st.selectbox("生徒氏名", c_students, key="quick_st")
+        f_date = st.date_input("日付（今日が初期値）", key="quick_date")
+        f_cat = st.selectbox("対象分野（手入力メモ用）", ["数学", "総合・行動の記録", "国語・他", "特別活動", "生活指導"], key="quick_cat")
+
+        st.markdown('<div class="step-head">STEP 2 ワンタップで残す</div>', unsafe_allow_html=True)
+        st.markdown("### ⚡ クイックスタンプ（よく使う6種・大きなボタン）")
+        st.caption("授業中に片手で押せる配置です。押すだけですぐ保存されます。")
+        
+        stamps = [
+            ("🙋‍♂️ 挙手・発言◎", "数学", "授業中に積極的に挙手し発言することができた。"),
+            ("💡 自力解決◎", "数学", "難しい問題に対して粘り強く思考し自力で正解を導き出した。"),
+            ("🤝 班活動リード", "総合・行動", "グループワークで意見をまとめ、周囲をよくサポートしていた。"),
+            ("🧹 清掃・手伝い◎", "総合・行動", "自分の担当領域が終わった後も進んで周囲の手伝いを行った。"),
+            ("📖 朝読書・集中", "特別活動", "静かに集中して朝の読書活動に取り組めた。"),
+            ("⚠️ 提出物フォロー", "生活指導", "提出物の期限について個別に声かけを行った。")
+        ]
+
+        def add_stamp_log(cat, memo):
+            stu_num = get_student_number(f_class, f_name)
+            new_row = pd.DataFrame([{"日付": str(f_date), "クラス": f_class, "出席番号": stu_num, "氏名": f_name, "対象分野": cat, "観察メモ": memo}])
+            st.session_state.daily_logs = pd.concat([st.session_state.daily_logs, new_row], ignore_index=True)
+            st.toast(f"✅ {f_class} {f_name} さんに記録しました！次は右側で所見生成できます。")
+
+        # 人間工学: 2列×3行で指の移動を最小化、全幅ボタン
+        for row in range(0, len(stamps), 2):
+            sc1, sc2 = st.columns(2)
+            for col_i, target_col in enumerate([sc1, sc2]):
+                idx = row + col_i
+                if idx < len(stamps):
+                    label, cat, text = stamps[idx]
+                    if target_col.button(label, key=f"stamp_{idx}", use_container_width=True, help=f"{cat}: {text}"):
+                        add_stamp_log(cat, text)
+
+        st.markdown("---")
+        st.markdown('<div class="step-head">STEP 3 詳しく残す（任意）</div>', unsafe_allow_html=True)
+        st.caption("スタンプで足りないときだけ開けばOKです。")
+        with st.expander("✍️ テキスト手動入力を開く（必要なときだけ）", expanded=False):
+            with st.form("add_log_form", clear_on_submit=True):
+                f_memo = st.text_area("自由記述観察メモ（具体的な場面・行動を短く）", placeholder="例: 3時間目の実験で班の考察をまとめ、発表で根拠を説明できた", height=100)
+                if st.form_submit_button("📥 詳細メモを保存（大きく・押しやすく）", use_container_width=True) and f_name and f_memo:
+                    stu_num_manual = get_student_number(f_class, f_name)
+                    new_row = pd.DataFrame([{"日付": str(f_date), "クラス": f_class, "出席番号": stu_num_manual, "氏名": f_name, "対象分野": f_cat, "観察メモ": f_memo}])
+                    st.session_state.daily_logs = pd.concat([st.session_state.daily_logs, new_row], ignore_index=True)
+                    st.success(f"{f_name} さんのメモを追加しました！右側で件数が増えたことを確認できます。")
+
+    with col_b:
+        st.markdown('<div class="step-head">STEP 4 たまった記録から作る</div>', unsafe_allow_html=True)
+        st.markdown("### ✨ 蓄積メモからAI所見生成（出力はここに集約）")
+        selected_student = f_name
+        
+        student_memos = st.session_state.daily_logs[(st.session_state.daily_logs["氏名"] == selected_student) & (st.session_state.daily_logs["クラス"] == f_class)]
+        st.info(f"📜 **{f_class} {selected_student} さんの蓄積メモ（{len(student_memos)}件）** — 左で保存するとここに増えます。")
+        st.dataframe(student_memos[["日付", "対象分野", "観察メモ"]], use_container_width=True, height=220)
+        
+        if st.button("🪄 蓄積メモから所見文案を自動生成（大きく・一番目立つ）", type="primary", use_container_width=True):
+            if not student_memos.empty:
+                combined_memos = "\n".join(student_memos["観察メモ"].tolist())
+                prompt = f"生徒『{selected_student}』の蓄積メモ:\n{combined_memos}\n\n上記メモをもとに通知表用の所見文案を作成してください。文字数は約{max_char_limit}文字程度。{ending_rule}"
+                with st.spinner("AIが個人情報を保護しながら所見文案を作成中..."):
+                    generated_text = safe_generate_content(prompt, student_name_map=[selected_student])
+                    st.text_area("生成された所見文案（このままコピー・修正可）:", value=generated_text, height=200)
+                    st.caption(f"目安 {max_char_limit}文字・{ending_rule} で生成しています。次は②ダッシュボードで偏りを確認しましょう。")
+            else:
+                st.warning("この生徒の観察メモがまだ登録されていません。左のスタンプから1件残してみましょう。")
+
+# ------------------------------------------
+# 機能2: ② 学級日常ダッシュボード（観察アラート）
+# ------------------------------------------
+elif selected_menu == "🔔 ② 学級日常ダッシュボード（観察アラート）":
+    st.subheader("🔔 学級日常ダッシュボード（観察メモ不足・見守りアラート）")
+    st.caption("見る順番: ①左の人数とアラートを確認 → ②右の一覧で声かけ対象を決める → ③①画面に戻って記録。")
+
+    _dash_all = get_all_classes()
+    _dash_idx = _dash_all.index(st.session_state.current_class) if st.session_state.current_class in _dash_all else 0
+    target_dash_cls = st.selectbox("対象クラス選択（①と連動・記憶されます）:", _dash_all, index=_dash_idx, key="dash_cls_sel")
+    st.session_state.current_class = target_dash_cls
+    cls_students = get_active_students(target_dash_cls)
+    
+    logs_df = st.session_state.daily_logs[st.session_state.daily_logs["クラス"] == target_dash_cls].copy()
+    logs_df["日付_dt"] = pd.to_datetime(logs_df["日付"])
+    
+    two_weeks_ago = datetime.now() - timedelta(days=14)
+    
+    summary_data = []
+    alert_students = []
+
+    for name in cls_students:
+        st_logs = logs_df[logs_df["氏名"] == name]
+        total_count = len(st_logs)
+        recent_count = len(st_logs[st_logs["日付_dt"] >= two_weeks_ago])
+        last_date = st_logs["日付"].max() if not st_logs.empty else "記録なし"
+        
+        is_alert = recent_count == 0
+        if is_alert:
+            alert_students.append(name)
+
+        summary_data.append({
+            "氏名": name,
+            "累計メモ数": total_count,
+            "直近14日間のメモ": f"{recent_count} 件",
+            "最終記録日": last_date,
+            "状態アラート": "🚨 14日以上メモなし" if is_alert else "✅ 順調に蓄積中"
+        })
+
+    sum_df = pd.DataFrame(summary_data)
+
+    col_d1, col_d2 = st.columns([1, 2])
+    with col_d1:
+        st.metric("クラス総人数", f"{len(cls_students)} 名")
+        st.metric("🚨 観察メモ不足（要声かけ）生徒", f"{len(alert_students)} 名")
+
+        if alert_students:
+            st.markdown("<div class='alert-card'><b>💡 以下の生徒は最近記録がありません:</b><br>" + "、".join(alert_students) + "</div>", unsafe_allow_html=True)
+
+    with col_d2:
+        st.markdown("### 📋 クラス全員の記録蓄積状況")
+        st.dataframe(sum_df, use_container_width=True, height=350)
+
+# ------------------------------------------
+# 機能3: ③ CSV一括生成
+# ------------------------------------------
+elif selected_menu == "📁 ③ CSV一括生成":
+    st.subheader("📁 クラス全員の蓄積メモから一括所見生成")
+    _t2_all = get_all_classes()
+    _t2_idx = _t2_all.index(st.session_state.current_class) if st.session_state.current_class in _t2_all else 0
+    target_cls = st.selectbox("一括生成対象クラス:", _t2_all, index=_t2_idx, key="t2_cls")
+    st.session_state.current_class = target_cls
+    
+    if st.button("🚀 クラス全員の所見をAI一括生成"):
+        cls_memos = st.session_state.daily_logs[st.session_state.daily_logs["クラス"] == target_cls]
+        results = []
+        progress_bar = st.progress(0)
+        unique_names = get_active_students(target_cls)
+        
+        for i, name in enumerate(unique_names):
+            group = cls_memos[cls_memos["氏名"] == name]
+            all_memos = " / ".join(group["観察メモ"].tolist()) if not group.empty else "日々の授業に真面目に取り組んでいる。"
+            prompt = f"生徒:{name} メモ:{all_memos} の通知表所見を作成。文字数は約{max_char_limit}文字。{ending_rule}"
+            
+            gen_text = safe_generate_content(prompt, student_name_map=[name])
+            results.append({"氏名": name, "まとめメモ": all_memos, "生成所見": gen_text})
+            progress_bar.progress((i + 1) / len(unique_names))
+                
+        res_df = pd.DataFrame(results)
+        st.dataframe(res_df, use_container_width=True, height=300)
+        csv_data = res_df.to_csv(index=False).encode('utf-8-sig')
+        st.download_button(f"📥 {target_cls} 全員の所見一括CSVをダウンロード", csv_data, f"{target_cls}_一括所見データ.csv", "text/csv")
+
+# ------------------------------------------
+# 機能4: ④ 所見自動校正
+# ------------------------------------------
+elif selected_menu == "🔍 ④ 所見データ自動校正":
+    st.subheader("🔍 所見データの自動校正 & 不適切表現チェック")
+    _chk_classes = get_all_classes()
+    _chk_default_idx = _chk_classes.index(st.session_state.current_class) if st.session_state.current_class in _chk_classes else 0
+    chk_cls = st.selectbox("対象クラス:", _chk_classes, index=_chk_default_idx, key="chk_cls")
+    st.session_state.current_class = chk_cls
+    c1_students = get_active_students(chk_cls)
+    if not c1_students:
+        st.warning("このクラスに在籍生徒がいません。⓪名簿管理で名簿を確認してください。")
+        st.stop()
+    student_for_check = st.selectbox("校正を試す生徒を選択:", c1_students, key="chk_st")
+    
+    memos_text = " ".join(st.session_state.daily_logs[st.session_state.daily_logs["氏名"] == student_for_check]["観察メモ"].tolist())
+    sample_text = st.text_area("校正対象テキスト:", value=f"{student_for_check}さんは、" + memos_text, height=120)
+        
+    if st.button("🛡️ AI誤字脱字・表現校正を実行", type="primary"):
+        if sample_text:
+            prompt = f"誤字脱字チェックおよび保護者目線での適切な文章校正を行ってください:\n{sample_text}\n{ending_rule}"
+            res_text = safe_generate_content(prompt, student_name_map=[student_for_check])
+            st.markdown("### 💡 校正結果アドバイス:")
+            st.info(res_text)
+
+# ------------------------------------------
+# 機能5: ⑤ 蓄積連動カルテ
+# ------------------------------------------
+elif selected_menu == "💬 ⑤ 蓄積連動カルテ":
+    st.subheader("💬 保護者面談用カルテ（蓄積メモ＋テスト成績の自動連携）")
+    _kart_classes = get_all_classes()
+    _kart_default_idx = _kart_classes.index(st.session_state.current_class) if st.session_state.current_class in _kart_classes else 0
+    kart_cls = st.selectbox("対象クラス:", _kart_classes, index=_kart_default_idx, key="kart_cls")
+    st.session_state.current_class = kart_cls
+    _kart_students = get_active_students(kart_cls)
+    if not _kart_students:
+        st.warning("このクラスに在籍生徒がいません。⓪名簿管理で名簿を確認してください。")
+        st.stop()
+    kart_student = st.selectbox("面談対象生徒を選択:", _kart_students, key="kart_st")
+    
+    st_memos = st.session_state.daily_logs[(st.session_state.daily_logs["氏名"] == kart_student) & (st.session_state.daily_logs["クラス"] == kart_cls)]
+    st_scores = st.session_state.subject_scores[(st.session_state.subject_scores["氏名"] == kart_student) & (st.session_state.subject_scores["クラス"] == kart_cls)]
+    
+    col_k1, col_k2 = st.columns(2)
+    with col_k1:
+        st.markdown(f"### 📜 日々の観察記録（{len(st_memos)}件）")
+        st.dataframe(st_memos[["日付", "対象分野", "観察メモ"]], use_container_width=True, height=200)
+    with col_k2:
+        st.markdown("### 📊 自教科テスト＆観点成績")
+        st.dataframe(st_scores[["中間テスト", "期末テスト", "見込み点", "観点1_評価", "観点2_評価", "観点3_評価", "★確定評定"]], use_container_width=True)
+        
+    if st.button("📋 面談用トークポイントカルテをAI生成", type="primary"):
+        memo_concat = " ".join(st_memos['観察メモ'].tolist())
+        score_info = st_scores.to_dict(orient="records")[0] if not st_scores.empty else {}
+        prompt = f"生徒『{kart_student}』の観察記録:{memo_concat}\nテスト成績:中間{score_info.get('中間テスト')}点, 期末{score_info.get('期末テスト')}点, 最終評定{score_info.get('★確定評定')}\n面談で保護者に伝える【1.学習面・生活面の成長点 2.今後の課題 3.家庭での連携アドバイス】を簡潔に作成してください。"
+        res_text = safe_generate_content(prompt, student_name_map=[kart_student])
+        st.info("💡 **AI生成 面談用カルテシート:**")
+        st.markdown(res_text)
+
+# ------------------------------------------
+# 機能6: ⑥ 成績・観点A/B/C算出＆人間調整
+# ------------------------------------------
+elif selected_menu == "📊 ⑥ 成績・観点A/B/C算出＆人間調整":
+    st.subheader("📊 成績・観点A/B/C評価算出 ＆ 人間調整")
+    st.caption("操作順: ①クラス選択 → ②表で★確定評定を修正 → ③再計算/保存。保存が一番目立つボタンです。")
+    _eval_all = get_all_classes()
+    _eval_idx = _eval_all.index(st.session_state.current_class) if st.session_state.current_class in _eval_all else 0
+    sel_eval_cls = st.selectbox("対象クラス切替（①と連動）:", _eval_all, index=_eval_idx, key="t5_cls")
+    st.session_state.current_class = sel_eval_cls
+
+    with st.expander("⚙️ 【設定】観点別評価（A/B/C）のカッティングポイント（しきい値）設定", expanded=False):
+        st.caption("各観点の点数（100点満点換算）をどのラインでA・B・C評価に自動換算するかを設定できます。")
+        col_cp1, col_cp2, col_cp3 = st.columns(3)
+        with col_cp1:
+            st.markdown("**観点1 (知識・技能)**")
+            cut_k1_a = st.number_input("A評価のボーダー (点以上)", value=80, key="cp_k1_a")
+            cut_k1_b = st.number_input("B評価のボーダー (点以上)", value=50, key="cp_k1_b")
+        with col_cp2:
+            st.markdown("**観点2 (思考・判断・表現)**")
+            cut_k2_a = st.number_input("A評価のボーダー (点以上)", value=80, key="cp_k2_a")
+            cut_k2_b = st.number_input("B評価のボーダー (点以上)", value=50, key="cp_k2_b")
+        with col_cp3:
+            st.markdown("**観点3 (主体的に学習に取り組む態度)**")
+            cut_k3_a = st.number_input("A評価のボーダー (点以上)", value=80, key="cp_k3_a")
+            cut_k3_b = st.number_input("B評価のボーダー (点以上)", value=50, key="cp_k3_b")
+
+    st.markdown("---")
+
+    cls_score_df = st.session_state.subject_scores[st.session_state.subject_scores["クラス"] == sel_eval_cls].copy()
+
+    st.markdown("### ✏️ 成績＆評価データ・人間微調整シート")
+    st.caption("💡 **調整方法:** 右側の「★確定評定」列を必要に応じて打ち替えてください。自動評定と異なる場合は「⚠️ 変更済」フラグが自動的に立ちます。")
+
+    columns_order = [
+        "出席番号", "氏名", "中間テスト", "期末テスト", "見込み点",
+        "観点1_知識(点)", "観点1_評価", 
+        "観点2_思考(点)", "観点2_評価", 
+        "観点3_主体性(点)", "観点3_評価", 
+        "自動評定", "★確定評定", "調整フラグ", "調整理由"
+    ]
+    
+    for col in columns_order:
+        if col not in cls_score_df.columns:
+            cls_score_df[col] = ""
+
+    display_df = cls_score_df[columns_order]
+
+    edited_scores = st.data_editor(
+        display_df,
+        num_rows="dynamic",
+        use_container_width=True,
+        height=400,
+        key=f"score_editor_{sel_eval_cls}"
+    )
+
+    col_btn1, col_btn2 = st.columns([1, 1])
+    with col_btn1:
+        if st.button("⚡ 再計算（しきい値反映）", use_container_width=True, help="カッティングポイントを変えたら先にここを押します"):
+            def _to_score(v):
+                try:
+                    f = float(pd.to_numeric(v, errors="coerce"))
+                    if pd.isna(f):
+                        return None
+                    return f
+                except Exception:
+                    return None
+
+            def recalculate_row(row):
+                k1 = _to_score(row["観点1_知識(点)"])
+                k2 = _to_score(row["観点2_思考(点)"])
+                k3 = _to_score(row["観点3_主体性(点)"])
+                # 空欄・非数値は再計算せず元の行を維持(手入力中のクラッシュ防止)
+                if k1 is None or k2 is None or k3 is None:
+                    return row
+                row["観点1_評価"] = "A" if k1 >= cut_k1_a else ("B" if k1 >= cut_k1_b else "C")
+                
+                row["観点2_評価"] = "A" if k2 >= cut_k2_a else ("B" if k2 >= cut_k2_b else "C")
+                
+                row["観点3_評価"] = "A" if k3 >= cut_k3_a else ("B" if k3 >= cut_k3_b else "C")
+
+                avg = (k1 + k2 + k3) / 3
+                auto_g = 5 if avg >= 85 else (4 if avg >= 70 else (3 if avg >= 55 else (2 if avg >= 40 else 1)))
+                row["自動評定"] = auto_g
+
+                if pd.isna(row["★確定評定"]) or str(row["★確定評定"]).strip() == "":
+                    row["★確定評定"] = auto_g
+
+                if str(row["自動評定"]) != str(row["★確定評定"]):
+                    row["調整フラグ"] = "⚠️ 変更済"
+                else:
+                    row["調整フラグ"] = "―"
+                
+                return row
+
+            updated_df = edited_scores.apply(recalculate_row, axis=1)
+            st.session_state.subject_scores.update(updated_df)
+            st.success("🎉 指定したカッティングポイントに基づき、A/B/C評価と評定・調整フラグを最新化しました！")
+            st.rerun()
+
+    with col_btn2:
+        if st.button("💾 確定保存（最優先・大きく）", type="primary", use_container_width=True):
+            def check_flag(row):
+                if str(row["自動評定"]) != str(row["★確定評定"]):
+                    row["調整フラグ"] = "⚠️ 変更済"
+                else:
+                    row["調整フラグ"] = "―"
+                return row
+            
+            final_df = edited_scores.apply(check_flag, axis=1)
+            st.session_state.subject_scores.update(final_df)
+            st.success("✅ 保存しました。次は③一括生成または⑨出力へ進めます。")
+
+# ------------------------------------------
+# 機能7: ⑦ 学期推移ダッシュボード
+# ------------------------------------------
+elif selected_menu == "📈 ⑦ 学期推移ダッシュボード":
+    st.subheader("📈 学期・テスト別 成績推移ダッシュボード")
+    dash_cls = st.selectbox("ダッシュボード対象クラス:", get_all_classes(), key="t6_cls")
+    
+    cls_scores = st.session_state.subject_scores[st.session_state.subject_scores["クラス"] == dash_cls]
+    
+    st.markdown(f"### 📊 {dash_cls} 中間テスト vs 期末テスト 推移グラフ")
+    chart_data = cls_scores.set_index("氏名")[["中間テスト", "期末テスト"]]
+    st.line_chart(chart_data)
+    
+    st.markdown("### 📋 成績下降・フォロー対象者（期末テストで点数が下がった生徒）")
+    _fin = pd.to_numeric(cls_scores["期末テスト"], errors="coerce")
+    _mid = pd.to_numeric(cls_scores["中間テスト"], errors="coerce")
+    down_students = cls_scores[(_mid.notna()) & (_fin.notna()) & (_fin < _mid)]
+    st.dataframe(down_students[["出席番号", "氏名", "中間テスト", "期末テスト", "★確定評定", "調整フラグ"]], use_container_width=True)
+
+# ------------------------------------------
+# 機能8: ⑧ 担任用 全教科成績集約
+# ------------------------------------------
+elif selected_menu == "🔄 ⑧ 担任用 全教科成績集約":
+    st.subheader("🔄 各教科の成績ファイル自動名寄せ統合（ダミーデータ機能付き）")
+    st.caption("他教科の担任から集まった個別CSVファイルを1人1行の全教科シートに合体します。")
+    
+    _agg_classes = get_all_classes()
+    _agg_default_idx = _agg_classes.index(st.session_state.current_class) if st.session_state.current_class in _agg_classes else 0
+    agg_cls = st.selectbox("集約対象クラス:", _agg_classes, index=_agg_default_idx, key="agg_cls")
+    st.session_state.current_class = agg_cls
+    if st.button("🎲 他教科（国語・英語・理科・社会）の集約用ダミーデータを自動生成して結合テスト"):
+        c1_students = st.session_state.student_master[st.session_state.student_master["クラス"] == agg_cls]["氏名"].tolist()
+        
+        kokugo_df = pd.DataFrame([{"氏名": n, "国語_評定": random.randint(2, 5), "国語_観点_知識": random.randint(60, 95)} for n in c1_students])
+        eigo_df = pd.DataFrame([{"氏名": n, "英語_評定": random.randint(2, 5), "英語_観点_知識": random.randint(55, 98)} for n in c1_students])
+        
+        math_df = st.session_state.subject_scores[st.session_state.subject_scores["クラス"] == agg_cls][["氏名", "★確定評定"]].rename(columns={"★確定評定": "数学_評定"})
+        
+        merged_all = pd.merge(math_df, kokugo_df, on="氏名")
+        merged_all = pd.merge(merged_all, eigo_df, on="氏名")
+        
+        st.success(f"🎉 {agg_cls}の数学・国語・英語の成績データを『氏名』で完璧に合体しました！")
+        st.dataframe(merged_all, use_container_width=True, height=350)
+        
+        csv_m = merged_all.to_csv(index=False).encode('utf-8-sig')
+        st.download_button(f"📥 {agg_cls} 全教科統合成績シート（CSV）を保存", csv_m, f"{agg_cls}_全教科成績統合表.csv", "text/csv")
+
+# ------------------------------------------
+# 機能9: 🖨️ 完成版プレビュー ＆ ファイルダウンロード（通知表・指導要録）
+# ------------------------------------------
+elif selected_menu == "🖨️ ⑨ 完成版プレビュー ＆ ファイルダウンロード（通知表・指導要録）":
+    st.subheader("🖨️ 完成版プレビュー ＆ ダウンロード")
+    st.caption("操作順: ①文書→②クラス→③児童→④形式。左で選ぶと右プレビューが連動し、一番下の大きなボタンで保存します。")
+    
+    col_out1, col_out2 = st.columns([1, 1.4], gap="large")
+    
+    with col_out1:
+        st.markdown('<div class="step-head">STEP 1 何を出すか</div>', unsafe_allow_html=True)
+        doc_category = st.radio("📄 出力対象文書:", ["通知表", "指導要録"], key="doc_cat_select", horizontal=True)
+        
+        st.markdown('<div class="step-head">STEP 2 誰を出すか</div>', unsafe_allow_html=True)
+        _out_all = get_all_classes()
+        _out_idx = _out_all.index(st.session_state.current_class) if st.session_state.current_class in _out_all else 0
+        out_cls = st.selectbox("クラス選択:", _out_all, index=_out_idx, key="t8_cls")
+        st.session_state.current_class = out_cls
+        out_students = get_active_students(out_cls)
+        if not out_students:
+            st.warning("このクラスに在籍生徒がいません。⓪名簿管理で名簿を確認してください。")
+            st.stop()
+        print_student = st.selectbox("生徒選択:", out_students)
+        
+        st.markdown('<div class="step-head">STEP 3 形を整えて保存</div>', unsafe_allow_html=True)
+        output_format = st.selectbox("出力フォーマット:", ["Word形式 (.docx)", "テキスト形式 (.txt)"], key="out_format_select")
+        with st.expander("学校独自テンプレートを使う（任意・必要なときだけ）", expanded=False):
+            st.caption("※Word (.docx) の{{タグ}}差し込み対応。未指定なら標準様式で出力します。")
+            template_file = st.file_uploader(
+                f"学校独自{doc_category}テンプレート (.docx)",
+                type=["docx"],
+                key="template_file_upload"
+            )
+        if "template_file" not in locals():
+            template_file = None
+
+    with col_out2:
+        st.markdown(f"### 📄 差し込みプレビュー（{doc_category}：{out_cls} {print_student} 様）")
+        
+        if print_student:
+            _info_match = st.session_state.student_master[(st.session_state.student_master["氏名"] == print_student) & (st.session_state.student_master["クラス"] == out_cls)]
+            if _info_match.empty:
+                _info_match = st.session_state.student_master[st.session_state.student_master["氏名"] == print_student]
+            st_info = _info_match.iloc[0].to_dict()
+            score_match = st.session_state.subject_scores[(st.session_state.subject_scores["氏名"] == print_student) & (st.session_state.subject_scores["クラス"] == out_cls)]
+            if score_match.empty:
+                score_match = st.session_state.subject_scores[st.session_state.subject_scores["氏名"] == print_student]
+            st_score = score_match.iloc[0].to_dict() if not score_match.empty else {}
+            
+            mid_display = str(st_score.get('中間テスト', '-'))
+            if pd.isna(st_score.get('中間テスト')) or st_score.get('中間テスト') is None:
+                if st_score.get('見込み点'):
+                    mid_display = f"未受検 (見込み点: {st_score.get('見込み点')}点)"
+                else:
+                    mid_display = "未受検"
+
+            default_remark = st_score.get('総合所見', '（所見データ準備完了）')
+            if doc_category == "指導要録":
+                default_remark = default_remark.replace("でした。", "であった。").replace("ました。", "した。").replace("です。", "である。")
+
+            st.markdown(f"""
+            <div class="student-card">
+                <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <h3 style="margin:0;">【{st.session_state.school_year}年度 1学期 {doc_category}プレビュー】</h3>
+                    <span style="background-color:#007bff; color:white; padding:3px 8px; border-radius:4px; font-size:0.8em;">
+                        取り込み形式: {template_file.name if template_file else '標準システムフォーマット'}
+                    </span>
+                </div>
+                <hr>
+                <p><strong>所属:</strong> {st_info.get('クラス')} | <strong>出席番号:</strong> {st_info.get('出席番号')}番</p>
+                <p><strong>氏名:</strong> <span style="font-size:1.3em; font-weight:bold;">{print_student}</span></p>
+                <p><strong>学級担任:</strong> {st.session_state.teacher_name}</p>
+                <hr>
+                <h4>📊 学習評価・記録成績（差し込み完了）</h4>
+                <ul>
+                    <li>中間テスト: <strong>{mid_display}</strong> / 期末テスト: <strong>{st_score.get('期末テスト', '-')}</strong> 点</li>
+                    <li>観点1 (知識・技能): <strong>{st_score.get('観点1_評価', '-')}</strong> ({st_score.get('観点1_知識(点)', '-')}点)</li>
+                    <li>観点2 (思考・判断・表現): <strong>{st_score.get('観点2_評価', '-')}</strong> ({st_score.get('観点2_思考(点)', '-')}点)</li>
+                    <li>観点3 (主体的に取り組む態度): <strong>{st_score.get('観点3_評価', '-')}</strong> ({st_score.get('観点3_主体性(点)', '-')}点)</li>
+                    <li>確定学習評定（5段階）: <strong style="font-size:1.4em; color:#d9534f;">{st_score.get('★確定評定', '-')}</strong> (自動算出: {st_score.get('自動評定', '-')}) {st_score.get('調整フラグ', '')}</li>
+                </ul>
+                <hr>
+                <h4>📝 {doc_category} 所見欄（差し込み完了）</h4>
+                <p style="background-color: white; padding: 12px; border-radius: 6px; border: 1px solid #ccc; line-height: 1.6;">
+                    {default_remark}
+                </p>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            doc_data = {
+                "年度": st.session_state.school_year,
+                "担任名": st.session_state.teacher_name,
+                "クラス": st_info.get('クラス'),
+                "出席番号": st_info.get('出席番号'),
+                "氏名": print_student,
+                "中間": mid_display,
+                "期末": st_score.get('期末テスト', ''),
+                "観点1": st_score.get('観点1_評価', ''),
+                "観点2": st_score.get('観点2_評価', ''),
+                "観点3": st_score.get('観点3_評価', ''),
+                "評定": st_score.get('★確定評定', ''),
+                "総合所見": default_remark
+            }
+
+            download_label = f"📥 {print_student} さんの {doc_category}（{output_format}）を出力・ダウンロード"
+            
+            if "Word" in output_format:
+                try:
+                    if template_file and template_file.name.endswith(".docx"):
+                        doc = Document(template_file)
+                    else:
+                        doc = Document()
+                        doc.add_heading(f"{doc_category} - {print_student} 様", 0)
+                        doc.add_paragraph(f"年度: {st.session_state.school_year}年度 | 担任: {st.session_state.teacher_name}")
+                        doc.add_paragraph(f"クラス: {st_info.get('クラス')}  出席番号: {st_info.get('出席番号')}")
+                        doc.add_paragraph(f"中間テスト: {mid_display} | 期末テスト: {st_score.get('期末テスト', '')}点")
+                        doc.add_paragraph(f"数学評定: {st_score.get('★確定評定', '')}")
+                        doc.add_paragraph(f"{doc_category}所見:\n{default_remark}")
+                    
+                    filled_doc = replace_docx_tags(doc, doc_data)
+                    out_buffer = io.BytesIO()
+                    filled_doc.save(out_buffer)
+                    
+                    st.download_button(
+                        label=download_label,
+                        data=out_buffer.getvalue(),
+                        file_name=f"{doc_category}_{print_student}.docx",
+                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                        type="primary"
+                    )
+                except Exception as e:
+                    st.error(f"Wordファイルの生成中にエラーが発生しました: {e}")
+
+            elif "テキスト" in output_format:
+                pdf_text = f"""==================================================
+【{st.session_state.school_year}年度 1学期 {doc_category}】
+==================================================
+■ 児童生徒名 : {print_student}
+■ 所属      : {st_info.get('クラス')}  出席番号: {st_info.get('出席番号')}番
+■ 学級担任  : {st.session_state.teacher_name}
+--------------------------------------------------
+【学習の記録】
+・中間テスト : {mid_display}
+・期末テスト : {st_score.get('期末テスト', '')} 点
+・観点1(知識): {st_score.get('観点1_評価', '')}
+・観点2(思考): {st_score.get('観点2_評価', '')}
+・観点3(主体): {st_score.get('観点3_評価', '')}
+・確定評定   : {st_score.get('★確定評定', '')}
+--------------------------------------------------
+【{doc_category} 所見】
+{default_remark}
+==================================================
+"""
+                pdf_buffer = io.BytesIO(pdf_text.encode("utf-8-sig"))
+                st.download_button(
+                    label=download_label,
+                    data=pdf_buffer.getvalue(),
+                    file_name=f"{doc_category}_{print_student}.txt",
+                    mime="text/plain",
+                    type="primary"
+                )
