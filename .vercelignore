@@ -1,0 +1,12 @@
+# Vercel deploy対象外（Next.jsビルドに不要な重い成果物・配布物）
+.venv
+.venv-1
+dist
+build
+.next
+node_modules
+__pycache__
+*.py[cod]
+*.docx
+app_icon.ico
+pen_fudebako.png
